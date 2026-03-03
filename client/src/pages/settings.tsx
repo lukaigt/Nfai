@@ -69,11 +69,14 @@ export default function SettingsPage() {
   });
 
   const testAiMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/ai/test", {
-      apiKey: openrouterKey || undefined,
-      baseUrl: openrouterUrl || undefined,
-      model: activeModel || undefined,
-    }),
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/ai/test", {
+        apiKey: openrouterKey || undefined,
+        baseUrl: openrouterUrl || undefined,
+        model: activeModel || undefined,
+      });
+      return await res.json();
+    },
     onSuccess: (data: any) => {
       if (data.success) {
         toast({ title: "Connected!", description: `Model: ${data.model}` });
@@ -85,13 +88,16 @@ export default function SettingsPage() {
   });
 
   const telegramStartMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/telegram/start"),
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/telegram/start");
+      return await res.json();
+    },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/telegram/status"] });
       if (data.success) {
         toast({ title: "Telegram bot started" });
       } else {
-        toast({ title: "Failed to start Telegram bot", variant: "destructive" });
+        toast({ title: "Failed to start Telegram bot", description: data.error || "", variant: "destructive" });
       }
     },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
