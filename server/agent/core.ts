@@ -4,6 +4,32 @@ import { executeTool } from "./tools";
 import { AGENT_SYSTEM_PROMPT, buildTaskPrompt } from "./prompt";
 import type { Task } from "@shared/schema";
 
+const MAX_MEMORY_LENGTH = 4000;
+
+export async function readMemory(): Promise<string> {
+  const setting = await storage.getSetting("agent_memory");
+  return setting?.value || "";
+}
+
+export async function appendMemory(text: string): Promise<void> {
+  let current = await readMemory();
+  const timestamp = new Date().toISOString().split("T")[0];
+  const entry = `[${timestamp}] ${text}`;
+  current = current ? `${current}\n${entry}` : entry;
+  if (current.length > MAX_MEMORY_LENGTH) {
+    const lines = current.split("\n");
+    while (current.length > MAX_MEMORY_LENGTH && lines.length > 3) {
+      lines.shift();
+      current = lines.join("\n");
+    }
+  }
+  await storage.upsertSetting("agent_memory", current);
+}
+
+export async function clearMemory(): Promise<void> {
+  await storage.upsertSetting("agent_memory", "");
+}
+
 interface AgentStep {
   thinking: string;
   plan: string;
@@ -35,9 +61,10 @@ export async function executeTask(
 
   await storage.updateTask(task.id, { status: "running" });
 
+  const memory = await readMemory();
   const conversationHistory: { role: "system" | "user" | "assistant"; content: string }[] = [
     { role: "system", content: AGENT_SYSTEM_PROMPT },
-    { role: "user", content: buildTaskPrompt(task.description) },
+    { role: "user", content: buildTaskPrompt(task.description, undefined, memory || undefined) },
   ];
 
   let step = 0;
@@ -104,6 +131,11 @@ export async function executeTask(
           totalTokens,
           totalCostUsd: totalCost.toFixed(6),
         });
+
+        try {
+          const memSummary = `Task "${task.title}" completed (${totalTokens} tokens, $${totalCost.toFixed(4)}). Result: ${(parsed.result || parsed.summary || "").substring(0, 200)}`;
+          await appendMemory(memSummary);
+        } catch {}
 
         activeTasks.delete(task.id);
         return;

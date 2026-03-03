@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { executeTask, cancelTask, isTaskRunning } from "./agent/core";
+import { executeTask, cancelTask, isTaskRunning, readMemory, clearMemory } from "./agent/core";
 import { testConnection, chatCompletion } from "./agent/openrouter";
 
 let bot: any = null;
@@ -103,7 +103,34 @@ export async function startTelegramBot(): Promise<boolean> {
           "/list - List recent tasks",
           "/test - Test AI connection",
           "/id - Get your chat ID",
+          "/reset - Clear conversation & show token usage",
+          "/memory - View what I remember",
+          "/forget - Wipe my memory clean",
         ].join("\n"), { parse_mode: "Markdown" });
+        return;
+      }
+
+      if (text === "/reset") {
+        const tasks = await storage.getAllTasks();
+        const totalTokens = tasks.reduce((sum, t) => sum + (t.totalTokens || 0), 0);
+        const totalCost = tasks.reduce((sum, t) => sum + parseFloat(t.totalCostUsd || "0"), 0);
+        await bot.sendMessage(chatId, `Session reset.\n\nTotal tokens used: ${totalTokens.toLocaleString()}\nTotal cost: $${totalCost.toFixed(4)}\n\nMemory preserved. Use /forget to wipe memory too.`);
+        return;
+      }
+
+      if (text === "/memory") {
+        const memory = await readMemory();
+        if (!memory) {
+          await bot.sendMessage(chatId, "No memories stored yet. I'll remember things as I complete tasks.");
+        } else {
+          await bot.sendMessage(chatId, `*Agent Memory:*\n\`\`\`\n${memory.substring(0, 3500)}\n\`\`\``, { parse_mode: "Markdown" });
+        }
+        return;
+      }
+
+      if (text === "/forget") {
+        await clearMemory();
+        await bot.sendMessage(chatId, "Memory wiped clean. Starting fresh.");
         return;
       }
 

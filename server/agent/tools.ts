@@ -40,6 +40,15 @@ const toolHandlers: Record<string, ToolHandler> = {
     }
   },
 
+  async run_command(args: { command: string }): Promise<ToolResult> {
+    try {
+      const { stdout, stderr } = await execAsync(args.command, { timeout: 60000, maxBuffer: 1024 * 1024 });
+      return { success: true, output: (stdout + (stderr ? `\nSTDERR: ${stderr}` : "")).substring(0, 10000) };
+    } catch (error: any) {
+      return { success: false, output: error.stdout || "", error: (error.message || "").substring(0, 3000) };
+    }
+  },
+
   async install_package(args: { packageName: string }): Promise<ToolResult> {
     try {
       const { stdout, stderr } = await execAsync(`npm install ${args.packageName}`, { timeout: 60000 });
