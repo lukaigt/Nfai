@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 import { executeTask, cancelTask, isTaskRunning } from "./agent/core";
-import { testConnection } from "./agent/openrouter";
+import { testConnection, chatCompletion } from "./agent/openrouter";
 
 let bot: any = null;
 let TelegramBot: any = null;
@@ -15,6 +15,33 @@ async function loadTelegramBot() {
     }
   }
   return TelegramBot;
+}
+
+async function classifyMessage(text: string): Promise<{ isTask: boolean; reply?: string }> {
+  try {
+    const result = await chatCompletion([
+      {
+        role: "system",
+        content: `You are a message classifier. Determine if the user's message is:
+1. A casual/conversational message (greeting, question about you, thanks, etc.) - respond naturally and briefly
+2. An actionable task request (something that requires tools, research, automation, code, web actions) - mark as task
+
+Respond with JSON only:
+- For casual: {"isTask": false, "reply": "your conversational response"}
+- For task: {"isTask": true}`
+      },
+      { role: "user", content: text }
+    ], 0.3);
+
+    const cleaned = result.content.replace(/```json\n?|\n?```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+    return { isTask: !!parsed.isTask, reply: parsed.reply };
+  } catch {
+    if (text.length < 15 && !/\b(find|search|create|make|build|get|scrape|download|check|monitor|post|send|write|install|run|deploy|automate|hack|buy|sell|register|sign.?up|log.?in)\b/i.test(text)) {
+      return { isTask: false, reply: "Hey! Send me a task and I'll execute it. For example: 'Find the top trending repos on GitHub today'" };
+    }
+    return { isTask: true };
+  }
 }
 
 export async function startTelegramBot(): Promise<boolean> {
@@ -53,15 +80,17 @@ export async function startTelegramBot(): Promise<boolean> {
         await bot.sendMessage(chatId, [
           "*Autonomous Agent Ready*",
           "",
+          "Just send me a message and I'll figure out what to do:",
+          "- Chat naturally and I'll respond",
+          "- Ask me to do something and I'll execute it as a task",
+          "",
           "Commands:",
-          "/task <description> - Create and execute a task",
+          "/task <description> - Force execute as task",
           "/status - View running tasks",
           "/cancel <id> - Cancel a running task",
           "/list - List recent tasks",
           "/test - Test AI connection",
           "/id - Get your chat ID",
-          "",
-          "Or just send a message to create a task.",
         ].join("\n"), { parse_mode: "Markdown" });
         return;
       }
@@ -121,15 +150,21 @@ export async function startTelegramBot(): Promise<boolean> {
         return;
       }
 
-      if (!text.startsWith("/task")) {
-        await bot.sendMessage(chatId, "Send me a task with:\n/task <description>\n\nExample: /task Find the top 5 trending GitHub repos today");
-        return;
-      }
+      let taskDescription: string;
 
-      const taskDescription = text.replace("/task", "").trim();
-      if (!taskDescription) {
-        await bot.sendMessage(chatId, "Please describe the task.\n\nExample: /task Search for cheap VPS providers and compare prices");
-        return;
+      if (text.startsWith("/task")) {
+        taskDescription = text.replace("/task", "").trim();
+        if (!taskDescription) {
+          await bot.sendMessage(chatId, "Usage: /task <description>");
+          return;
+        }
+      } else {
+        const classification = await classifyMessage(text);
+        if (!classification.isTask) {
+          await bot.sendMessage(chatId, classification.reply || "Hey! What can I help you with?");
+          return;
+        }
+        taskDescription = text;
       }
 
       const task = await storage.createTask({
