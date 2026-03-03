@@ -1,12 +1,10 @@
 module.exports = {
   apps: [{
     name: "agent-core",
-    script: "npm",
-    args: "start",
+    script: "dist/index.cjs",
     cwd: __dirname,
     env: {
       NODE_ENV: "production",
-      PORT: "5001",
     },
     watch: false,
     max_memory_restart: "500M",
