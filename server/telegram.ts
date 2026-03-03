@@ -121,9 +121,14 @@ export async function startTelegramBot(): Promise<boolean> {
         return;
       }
 
-      const taskDescription = text.startsWith("/task") ? text.replace("/task", "").trim() : text;
+      if (!text.startsWith("/task")) {
+        await bot.sendMessage(chatId, "Send me a task with:\n/task <description>\n\nExample: /task Find the top 5 trending GitHub repos today");
+        return;
+      }
+
+      const taskDescription = text.replace("/task", "").trim();
       if (!taskDescription) {
-        await bot.sendMessage(chatId, "Please describe the task.");
+        await bot.sendMessage(chatId, "Please describe the task.\n\nExample: /task Search for cheap VPS providers and compare prices");
         return;
       }
 
