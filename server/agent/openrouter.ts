@@ -28,8 +28,8 @@ async function getOpenRouterClient(): Promise<OpenAI> {
   const apiKeySetting = await storage.getSetting("openrouter_api_key");
   const baseUrlSetting = await storage.getSetting("openrouter_base_url");
 
-  const apiKey = apiKeySetting?.value || process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY || "";
-  const baseURL = baseUrlSetting?.value || process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
+  const apiKey = apiKeySetting?.value || process.env.OPENROUTER_API_KEY || process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY || "";
+  const baseURL = baseUrlSetting?.value || process.env.OPENROUTER_BASE_URL || process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 
   return new OpenAI({ apiKey, baseURL });
 }
