@@ -19,7 +19,7 @@ An autonomous AI agent similar to OpenClaw, controllable via Telegram, powered b
 - `server/agent/prompt.ts` - AI system prompt (agent brain / personality)
 - `server/agent/openrouter.ts` - OpenRouter API client with cost tracking
 - `server/agent/tools.ts` - Tool registry (14 tools: web scrape, code exec, puppeteer, etc.)
-- `server/telegram.ts` - Telegram bot interface with commands
+- `server/telegram.ts` - Telegram bot with conversational AI (chat history, plan→confirm→execute flow)
 - `server/routes.ts` - Dashboard API endpoints with Zod validation
 - `server/storage.ts` - Database storage layer (DatabaseStorage)
 - `server/db.ts` - PostgreSQL connection
