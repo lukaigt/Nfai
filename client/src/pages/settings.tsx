@@ -17,6 +17,8 @@ export default function SettingsPage() {
   const [openrouterKey, setOpenrouterKey] = useState("");
   const [openrouterUrl, setOpenrouterUrl] = useState("https://openrouter.ai/api/v1");
   const [model, setModel] = useState("deepseek/deepseek-chat-v3-0324");
+  const [customModel, setCustomModel] = useState("");
+  const [useCustomModel, setUseCustomModel] = useState(false);
   const [telegramToken, setTelegramToken] = useState("");
   const [allowedUsers, setAllowedUsers] = useState("");
 
@@ -40,10 +42,21 @@ export default function SettingsPage() {
         return s ? (s.value.startsWith("***") ? "" : s.value) : fallback;
       };
       setOpenrouterUrl(getVal("openrouter_base_url", "https://openrouter.ai/api/v1"));
-      setModel(getVal("ai_model", "deepseek/deepseek-chat-v3-0324"));
+      const savedModel = getVal("ai_model", "deepseek/deepseek-chat-v3-0324");
+      const isKnown = models?.some((m: any) => m.id === savedModel);
+      if (isKnown || !models) {
+        setModel(savedModel);
+        setUseCustomModel(false);
+      } else {
+        setCustomModel(savedModel);
+        setUseCustomModel(true);
+        setModel("custom");
+      }
       setAllowedUsers(getVal("telegram_allowed_users", ""));
     }
-  }, [settings]);
+  }, [settings, models]);
+
+  const activeModel = useCustomModel ? customModel : model;
 
   const saveMutation = useMutation({
     mutationFn: (settingsArr: { key: string; value: string }[]) =>
@@ -56,12 +69,16 @@ export default function SettingsPage() {
   });
 
   const testAiMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/ai/test"),
+    mutationFn: () => apiRequest("POST", "/api/ai/test", {
+      apiKey: openrouterKey || undefined,
+      baseUrl: openrouterUrl || undefined,
+      model: activeModel || undefined,
+    }),
     onSuccess: (data: any) => {
       if (data.success) {
-        toast({ title: "AI Connected", description: `Model: ${data.model}` });
+        toast({ title: "Connected!", description: `Model: ${data.model}` });
       } else {
-        toast({ title: "Connection Failed", description: data.error, variant: "destructive" });
+        toast({ title: "Connection Failed", description: data.error || "Unknown error", variant: "destructive" });
       }
     },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
@@ -90,7 +107,7 @@ export default function SettingsPage() {
 
   function handleSave() {
     const toSave = [
-      { key: "ai_model", value: model },
+      { key: "ai_model", value: activeModel },
       { key: "openrouter_base_url", value: openrouterUrl },
       { key: "telegram_allowed_users", value: allowedUsers },
     ];
@@ -151,7 +168,14 @@ export default function SettingsPage() {
 
           <div className="space-y-1.5">
             <Label>Model</Label>
-            <Select value={model} onValueChange={setModel}>
+            <Select value={useCustomModel ? "custom" : model} onValueChange={(val) => {
+              if (val === "custom") {
+                setUseCustomModel(true);
+              } else {
+                setUseCustomModel(false);
+                setModel(val);
+              }
+            }}>
               <SelectTrigger data-testid="select-model">
                 <SelectValue />
               </SelectTrigger>
@@ -161,19 +185,40 @@ export default function SettingsPage() {
                     {m.id} (${(m.inputCost * 1000000).toFixed(2)}/M in)
                   </SelectItem>
                 ))}
+                <SelectItem value="custom">Custom model...</SelectItem>
               </SelectContent>
             </Select>
+            {useCustomModel && (
+              <Input
+                placeholder="e.g. deepseek/deepseek-chat-v3-0324"
+                value={customModel}
+                onChange={(e) => setCustomModel(e.target.value)}
+                data-testid="input-custom-model"
+                className="mt-2"
+              />
+            )}
+            <p className="text-xs text-muted-foreground">Browse all models at openrouter.ai/models</p>
           </div>
 
-          <Button
-            variant="secondary"
-            onClick={() => testAiMutation.mutate()}
-            disabled={testAiMutation.isPending}
-            data-testid="button-test-ai"
-          >
-            <TestTube className="h-4 w-4 mr-1" />
-            {testAiMutation.isPending ? "Testing..." : "Test Connection"}
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => testAiMutation.mutate()}
+              disabled={testAiMutation.isPending}
+              data-testid="button-test-ai"
+            >
+              <TestTube className="h-4 w-4 mr-1" />
+              {testAiMutation.isPending ? "Testing..." : "Test Connection"}
+            </Button>
+            <Button
+              onClick={handleSave}
+              disabled={saveMutation.isPending}
+              data-testid="button-save-ai"
+            >
+              <Save className="h-4 w-4 mr-1" />
+              {saveMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

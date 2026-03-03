@@ -292,9 +292,10 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/ai/test", async (_req, res) => {
+  app.post("/api/ai/test", async (req, res) => {
     try {
-      const result = await testConnection();
+      const { apiKey, baseUrl, model } = req.body || {};
+      const result = await testConnection({ apiKey, baseUrl, model });
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
