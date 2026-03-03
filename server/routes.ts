@@ -321,10 +321,18 @@ export async function registerRoutes(
 
   app.post("/api/telegram/start", async (_req, res) => {
     try {
+      const tokenSetting = await storage.getSetting("telegram_bot_token");
+      const token = tokenSetting?.value || process.env.TELEGRAM_BOT_TOKEN;
+      if (!token || token === "your-telegram-bot-token") {
+        return res.json({ success: false, error: "No Telegram token configured. Enter your token and Save first." });
+      }
       const success = await startTelegramBot();
-      res.json({ success, running: isBotRunning() });
+      if (!success) {
+        return res.json({ success: false, error: "Failed to start bot. Check your token is correct (get it from @BotFather on Telegram)." });
+      }
+      res.json({ success: true, running: isBotRunning() });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      res.json({ success: false, error: error.message });
     }
   });
 
