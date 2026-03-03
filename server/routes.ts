@@ -2,7 +2,7 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { executeTask, cancelTask, retryTask, isTaskRunning } from "./agent/core";
-import { testConnection, getAvailableModels, chatCompletion } from "./agent/openrouter";
+import { testConnection, getAvailableModels, fetchOpenRouterModels, chatCompletion } from "./agent/openrouter";
 import { getAvailableTools } from "./agent/tools";
 import { startTelegramBot, stopTelegramBot, isBotRunning } from "./telegram";
 import { insertTaskSchema, insertCredentialSchema } from "@shared/schema";
@@ -304,9 +304,10 @@ export async function registerRoutes(
 
   app.get("/api/ai/models", async (_req, res) => {
     try {
-      res.json(getAvailableModels());
+      const models = await fetchOpenRouterModels();
+      res.json(models);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      res.json(getAvailableModels());
     }
   });
 
