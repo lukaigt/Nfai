@@ -2,33 +2,8 @@ import { storage } from "../storage";
 import { chatCompletion } from "./openrouter";
 import { executeTool } from "./tools";
 import { AGENT_SYSTEM_PROMPT, buildTaskPrompt } from "./prompt";
+import { searchMemory, saveTaskMemory } from "./memory";
 import type { Task } from "@shared/schema";
-
-const MAX_MEMORY_LENGTH = 4000;
-
-export async function readMemory(): Promise<string> {
-  const setting = await storage.getSetting("agent_memory");
-  return setting?.value || "";
-}
-
-export async function appendMemory(text: string): Promise<void> {
-  let current = await readMemory();
-  const timestamp = new Date().toISOString().split("T")[0];
-  const entry = `[${timestamp}] ${text}`;
-  current = current ? `${current}\n${entry}` : entry;
-  if (current.length > MAX_MEMORY_LENGTH) {
-    const lines = current.split("\n");
-    while (current.length > MAX_MEMORY_LENGTH && lines.length > 3) {
-      lines.shift();
-      current = lines.join("\n");
-    }
-  }
-  await storage.upsertSetting("agent_memory", current);
-}
-
-export async function clearMemory(): Promise<void> {
-  await storage.upsertSetting("agent_memory", "");
-}
 
 interface AgentStep {
   thinking: string;
@@ -43,6 +18,7 @@ interface AgentStep {
 type ProgressCallback = (taskId: number, step: number, message: string, status: string) => void;
 
 const MAX_STEPS = 30;
+const COMPACTION_THRESHOLD = 30;
 const activeTasks = new Map<number, boolean>();
 
 export function isTaskRunning(taskId: number): boolean {
@@ -53,18 +29,52 @@ export function cancelTask(taskId: number): void {
   activeTasks.set(taskId, false);
 }
 
+async function compactHistory(
+  conversationHistory: { role: "system" | "user" | "assistant"; content: string }[]
+): Promise<{ tokensUsed: number; cost: number }> {
+  if (conversationHistory.length < COMPACTION_THRESHOLD) return { tokensUsed: 0, cost: 0 };
+
+  const system = conversationHistory[0];
+  const oldMessages = conversationHistory.slice(1, -15);
+  const recentMessages = conversationHistory.slice(-15);
+
+  if (oldMessages.length < 5) return { tokensUsed: 0, cost: 0 };
+
+  const summaryPrompt = oldMessages.map(m => `[${m.role}]: ${m.content.substring(0, 300)}`).join("\n");
+
+  try {
+    const result = await chatCompletion([
+      { role: "system", content: "Summarize this conversation history concisely. Include: key decisions made, tools used and results, important information shared by the user (credentials, preferences, file paths), current state of the task. Be factual and brief." },
+      { role: "user", content: summaryPrompt }
+    ], 0.3);
+
+    conversationHistory.length = 0;
+    conversationHistory.push(
+      system,
+      { role: "user", content: `[CONVERSATION SUMMARY]\n${result.content}\n[END SUMMARY]` },
+      ...recentMessages
+    );
+    return { tokensUsed: result.tokensUsed, cost: result.cost };
+  } catch {
+    const keepRecent = conversationHistory.slice(-20);
+    conversationHistory.length = 0;
+    conversationHistory.push(system, ...keepRecent);
+    return { tokensUsed: 0, cost: 0 };
+  }
+}
+
 export async function executeTask(
   task: Task,
   onProgress?: ProgressCallback
 ): Promise<void> {
   activeTasks.set(task.id, true);
-
   await storage.updateTask(task.id, { status: "running" });
 
-  const memory = await readMemory();
+  const relevantMemory = await searchMemory(task.description);
+
   const conversationHistory: { role: "system" | "user" | "assistant"; content: string }[] = [
     { role: "system", content: AGENT_SYSTEM_PROMPT },
-    { role: "user", content: buildTaskPrompt(task.description, undefined, memory || undefined) },
+    { role: "user", content: buildTaskPrompt(task.description, undefined, relevantMemory || undefined) },
   ];
 
   let step = 0;
@@ -76,6 +86,12 @@ export async function executeTask(
       step++;
 
       onProgress?.(task.id, step, `Thinking (step ${step})...`, "info");
+
+      const compactionResult = await compactHistory(conversationHistory);
+      if (compactionResult.tokensUsed > 0) {
+        totalTokens += compactionResult.tokensUsed;
+        totalCost += compactionResult.cost;
+      }
 
       const result = await chatCompletion(conversationHistory, 0.7);
       totalTokens += result.tokensUsed;
@@ -133,8 +149,7 @@ export async function executeTask(
         });
 
         try {
-          const memSummary = `Task "${task.title}" completed (${totalTokens} tokens, $${totalCost.toFixed(4)}). Result: ${(parsed.result || parsed.summary || "").substring(0, 200)}`;
-          await appendMemory(memSummary);
+          await saveTaskMemory(task.title, parsed.result || parsed.summary || "", totalTokens, totalCost.toFixed(4));
         } catch {}
 
         activeTasks.delete(task.id);
@@ -174,7 +189,7 @@ export async function executeTask(
             role: "user",
             content: toolResult.success
               ? `Tool "${parsed.tool}" executed successfully. Output:\n${toolResult.output.substring(0, 3000)}\n\nContinue with the next step.`
-              : `Tool "${parsed.tool}" FAILED. Error: ${toolResult.error}\n\nTry an alternative approach. Do NOT give up.`,
+              : `Tool "${parsed.tool}" FAILED. Error: ${toolResult.error}\n\nTry an alternative approach. Do NOT give up — think of another way to accomplish this.`,
           }
         );
       } else {
@@ -182,15 +197,6 @@ export async function executeTask(
           { role: "assistant", content: result.content },
           { role: "user", content: "Continue. If you need to use a tool, specify it. If the task is done, set done: true." }
         );
-      }
-
-      if (conversationHistory.length > 40) {
-        const system = conversationHistory[0];
-        const initial = conversationHistory[1];
-        const recent = conversationHistory.slice(-20);
-        const summary = `[Previous steps summarized: Completed ${step - 10} steps. Key actions taken so far.]`;
-        conversationHistory.length = 0;
-        conversationHistory.push(system, initial, { role: "user", content: summary }, ...recent);
       }
     }
 

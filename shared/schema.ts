@@ -82,6 +82,29 @@ export const taskLogsRelations = relations(taskLogs, ({ one }) => ({
   task: one(tasks, { fields: [taskLogs.taskId], references: [tasks.id] }),
 }));
 
+export const agentMemories = pgTable("agent_memories", {
+  id: serial("id").primaryKey(),
+  content: text("content").notNull(),
+  source: text("source").notNull().default("task"),
+  tags: text("tags"),
+  hash: text("hash").notNull(),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+
+export const scheduledTasks = pgTable("scheduled_tasks", {
+  id: serial("id").primaryKey(),
+  description: text("description").notNull(),
+  intervalMinutes: integer("interval_minutes").notNull(),
+  telegramChatId: text("telegram_chat_id").notNull(),
+  lastRunAt: timestamp("last_run_at"),
+  nextRunAt: timestamp("next_run_at").notNull(),
+  lastResult: text("last_result"),
+  isActive: boolean("is_active").notNull().default(true),
+  activeStartHour: integer("active_start_hour"),
+  activeEndHour: integer("active_end_hour"),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+
 export const conversationsRelations = relations(conversations, ({ many }) => ({
   messages: many(messages),
 }));
@@ -135,3 +158,20 @@ export type Credential = typeof credentials.$inferSelect;
 export type InsertCredential = z.infer<typeof insertCredentialSchema>;
 export type Conversation = typeof conversations.$inferSelect;
 export type Message = typeof messages.$inferSelect;
+
+export const insertMemorySchema = createInsertSchema(agentMemories).omit({
+  id: true,
+  createdAt: true,
+});
+export type AgentMemory = typeof agentMemories.$inferSelect;
+export type InsertMemory = z.infer<typeof insertMemorySchema>;
+
+export const insertScheduledTaskSchema = createInsertSchema(scheduledTasks).omit({
+  id: true,
+  lastRunAt: true,
+  lastResult: true,
+  isActive: true,
+  createdAt: true,
+});
+export type ScheduledTask = typeof scheduledTasks.$inferSelect;
+export type InsertScheduledTask = z.infer<typeof insertScheduledTaskSchema>;

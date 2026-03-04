@@ -1,11 +1,13 @@
 import {
   users, agentSettings, tasks, taskLogs, credentials, conversations, messages,
+  agentMemories, scheduledTasks,
   type User, type InsertUser, type AgentSetting, type InsertSetting,
   type Task, type InsertTask, type TaskLog, type InsertTaskLog,
-  type Credential, type InsertCredential, type Conversation, type Message
+  type Credential, type InsertCredential, type Conversation, type Message,
+  type AgentMemory, type InsertMemory, type ScheduledTask, type InsertScheduledTask
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, asc, sql } from "drizzle-orm";
+import { eq, desc, asc, sql, lte, and } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -32,6 +34,18 @@ export interface IStorage {
   createCredential(cred: InsertCredential): Promise<Credential>;
   updateCredential(id: number, data: Partial<Credential>): Promise<Credential | undefined>;
   deleteCredential(id: number): Promise<void>;
+
+  createMemory(mem: InsertMemory): Promise<AgentMemory>;
+  getAllMemories(): Promise<AgentMemory[]>;
+  searchMemories(query: string): Promise<AgentMemory[]>;
+  clearMemories(): Promise<void>;
+
+  createScheduledTask(task: InsertScheduledTask): Promise<ScheduledTask>;
+  getAllScheduledTasks(): Promise<ScheduledTask[]>;
+  getActiveScheduledTasks(): Promise<ScheduledTask[]>;
+  getDueScheduledTasks(): Promise<ScheduledTask[]>;
+  updateScheduledTask(id: number, data: Partial<ScheduledTask>): Promise<ScheduledTask | undefined>;
+  deleteScheduledTask(id: number): Promise<void>;
 
   getStats(): Promise<{ totalTasks: number; completedTasks: number; failedTasks: number; runningTasks: number; totalTokens: number; totalCost: string }>;
 }
@@ -139,6 +153,73 @@ export class DatabaseStorage implements IStorage {
 
   async deleteCredential(id: number): Promise<void> {
     await db.delete(credentials).where(eq(credentials.id, id));
+  }
+
+  async createMemory(mem: InsertMemory): Promise<AgentMemory> {
+    const [created] = await db.insert(agentMemories).values(mem).returning();
+    return created;
+  }
+
+  async getAllMemories(): Promise<AgentMemory[]> {
+    return db.select().from(agentMemories).orderBy(desc(agentMemories.createdAt)).limit(100);
+  }
+
+  async searchMemories(query: string): Promise<AgentMemory[]> {
+    const all = await db.select().from(agentMemories).orderBy(desc(agentMemories.createdAt));
+    if (!query) return all.slice(0, 20);
+    const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    if (terms.length === 0) return all.slice(0, 20);
+    const scored = all.map(m => {
+      const text = (m.content + " " + (m.tags || "")).toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        let pos = 0;
+        while (true) {
+          const idx = text.indexOf(term, pos);
+          if (idx === -1) break;
+          score += 1;
+          pos = idx + term.length;
+        }
+      }
+      return { memory: m, score };
+    }).filter(s => s.score > 0);
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 10).map(s => s.memory);
+  }
+
+  async clearMemories(): Promise<void> {
+    await db.delete(agentMemories);
+  }
+
+  async createScheduledTask(task: InsertScheduledTask): Promise<ScheduledTask> {
+    const [created] = await db.insert(scheduledTasks).values(task).returning();
+    return created;
+  }
+
+  async getAllScheduledTasks(): Promise<ScheduledTask[]> {
+    return db.select().from(scheduledTasks).orderBy(desc(scheduledTasks.createdAt));
+  }
+
+  async getActiveScheduledTasks(): Promise<ScheduledTask[]> {
+    return db.select().from(scheduledTasks).where(eq(scheduledTasks.isActive, true));
+  }
+
+  async getDueScheduledTasks(): Promise<ScheduledTask[]> {
+    return db.select().from(scheduledTasks).where(
+      and(
+        eq(scheduledTasks.isActive, true),
+        lte(scheduledTasks.nextRunAt, new Date())
+      )
+    );
+  }
+
+  async updateScheduledTask(id: number, data: Partial<ScheduledTask>): Promise<ScheduledTask | undefined> {
+    const [updated] = await db.update(scheduledTasks).set(data).where(eq(scheduledTasks.id, id)).returning();
+    return updated || undefined;
+  }
+
+  async deleteScheduledTask(id: number): Promise<void> {
+    await db.delete(scheduledTasks).where(eq(scheduledTasks.id, id));
   }
 
   async getStats() {

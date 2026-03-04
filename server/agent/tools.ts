@@ -1,4 +1,5 @@
 import { storage } from "../storage";
+import { saveMemory } from "./memory";
 import https from "https";
 import http from "http";
 import { exec } from "child_process";
@@ -157,24 +158,13 @@ const toolHandlers: Record<string, ToolHandler> = {
     return { success: true, output: `Waited ${secs} seconds` };
   },
 
-  async puppeteer_navigate(args: { url: string }): Promise<ToolResult> {
-    return { success: true, output: `[Puppeteer] Would navigate to: ${args.url}. Note: Puppeteer requires a display server on VPS. Install with: npm install puppeteer. On VPS, run with xvfb-run for headless mode.` };
-  },
-
-  async puppeteer_click(args: { selector: string }): Promise<ToolResult> {
-    return { success: true, output: `[Puppeteer] Would click: ${args.selector}. Puppeteer fully functional on VPS deployment.` };
-  },
-
-  async puppeteer_type(args: { selector: string; text: string }): Promise<ToolResult> {
-    return { success: true, output: `[Puppeteer] Would type into: ${args.selector}. Puppeteer fully functional on VPS deployment.` };
-  },
-
-  async puppeteer_screenshot(): Promise<ToolResult> {
-    return { success: true, output: `[Puppeteer] Screenshot capability available on VPS deployment.` };
-  },
-
-  async puppeteer_evaluate(args: { script: string }): Promise<ToolResult> {
-    return { success: true, output: `[Puppeteer] Would evaluate script. Puppeteer fully functional on VPS deployment.` };
+  async save_memory(args: { content: string; tags: string }): Promise<ToolResult> {
+    try {
+      await saveMemory(args.content, args.tags || "general", "agent");
+      return { success: true, output: `Saved to memory: ${args.content.substring(0, 100)}` };
+    } catch (error: any) {
+      return { success: false, output: "", error: error.message };
+    }
   },
 };
 

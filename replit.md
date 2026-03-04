@@ -1,44 +1,52 @@
-# Agent Core - Autonomous AI Agent
+# Agent Core - Autonomous AI Agent (OpenClaw-style)
 
 ## Overview
-An autonomous AI agent similar to OpenClaw, controllable via Telegram, powered by OpenRouter (DeepSeek/Kimi models). Features a full web dashboard for monitoring, configuration, and credential management. Designed for VPS deployment.
+An autonomous AI agent inspired by OpenClaw architecture, controllable via Telegram, powered by OpenRouter (DeepSeek/Kimi models). Features unified conversation sessions, long-term keyword-searchable memory, heartbeat scheduling, context compaction, and a web dashboard. Designed for VPS deployment.
 
 ## Architecture
 - **Frontend**: React + Shadcn UI + Tailwind CSS (dark mode support)
 - **Backend**: Express.js + TypeScript
 - **Database**: PostgreSQL (Drizzle ORM)
 - **AI**: OpenRouter API (DeepSeek, Kimi, GPT, Claude, Gemini models)
-- **Telegram**: node-telegram-bot-api for command interface
+- **Telegram**: node-telegram-bot-api — unified conversational session
 - **Encryption**: AES-256-GCM for credential storage
-- **Tools**: Web scraping, code execution, HTTP requests, file ops, Puppeteer (VPS)
+- **Tools**: run_command (shell), web scrape, code exec, HTTP requests, file ops, search_web, save_memory
+
+## Key Design Decisions (OpenClaw-aligned)
+- **Unified session**: No separate "chat mode" vs "task mode" — one continuous conversation per chat. Conversation context flows into task execution
+- **Memory with search**: BM25-style keyword search over structured memory entries (not a flat string). Relevant memories injected per-task
+- **Context compaction**: When conversation exceeds 30 messages, old messages are AI-summarized into a compact summary (OpenClaw-style pruning)
+- **Heartbeat scheduling**: Recurring tasks via `scheduled_tasks` table, checked every 60s. "Every 15 minutes" actually works
+- **Autonomous prompt**: Agent thinks independently, never asks for clarification, uses get_credentials before complaining, searches the web for factual questions
+- **No fake tools**: Puppeteer stubs removed (they returned fake success). Agent uses run_command for real power
 
 ## Key Files
 
 ### Backend
-- `server/agent/core.ts` - Main agent execution loop with multi-step reasoning
-- `server/agent/prompt.ts` - AI system prompt (agent brain / personality)
+- `server/agent/core.ts` - Agent execution loop with context compaction and memory search
+- `server/agent/prompt.ts` - Autonomous system prompt (never ask, always act)
 - `server/agent/openrouter.ts` - OpenRouter API client with cost tracking
-- `server/agent/tools.ts` - Tool registry (14 tools: web scrape, code exec, puppeteer, etc.)
-- `server/telegram.ts` - Telegram bot with conversational AI (chat history, plan→confirm→execute flow)
-- `server/routes.ts` - Dashboard API endpoints with Zod validation
+- `server/agent/tools.ts` - Tool registry (11 real tools, no stubs)
+- `server/agent/memory.ts` - Long-term memory with BM25 keyword search
+- `server/agent/heartbeat.ts` - Scheduled task runner (60s check loop, active hours, duplicate suppression, overlap protection)
+- `server/agent/session.ts` - JSONL-based session persistence (survives restarts, auto-archive on /reset)
+- `server/telegram.ts` - Telegram bot: unified session, plan→confirm→execute, scheduling, memory commands
+- `server/routes.ts` - Dashboard API endpoints
 - `server/storage.ts` - Database storage layer (DatabaseStorage)
 - `server/db.ts` - PostgreSQL connection
 
 ### Frontend
 - `client/src/App.tsx` - Main app with sidebar layout
-- `client/src/components/app-sidebar.tsx` - Navigation sidebar
-- `client/src/components/theme-toggle.tsx` - Dark/light mode toggle
 - `client/src/pages/dashboard.tsx` - Overview stats and recent tasks
-- `client/src/pages/tasks.tsx` - Task management (create, cancel, retry, delete)
+- `client/src/pages/tasks.tsx` - Task management
 - `client/src/pages/credentials.tsx` - Platform account management
 - `client/src/pages/settings.tsx` - AI provider and Telegram configuration
 - `client/src/pages/logs.tsx` - Execution log viewer
 
 ### Shared
-- `shared/schema.ts` - Database models (tasks, taskLogs, credentials, agentSettings, users)
+- `shared/schema.ts` - Database models (tasks, taskLogs, credentials, agentSettings, agentMemories, scheduledTasks, users)
 
 ### Deployment
-- `.env.example` - Environment variable template
 - `ecosystem.config.cjs` - PM2 configuration for VPS
 - `drizzle.config.ts` - Database migration config
 
@@ -47,22 +55,24 @@ An autonomous AI agent similar to OpenClaw, controllable via Telegram, powered b
 - `task_logs` - Step-by-step execution logs per task
 - `credentials` - Encrypted platform accounts (AES-256-GCM)
 - `agent_settings` - Key-value configuration store
+- `agent_memories` - Long-term searchable memory entries (content, source, tags, hash)
+- `scheduled_tasks` - Recurring tasks (description, intervalMinutes, nextRunAt, activeHours)
 - `users` - User accounts
-- `conversations` / `messages` - Chat history
 
 ## VPS Deployment
 1. Push to GitHub
-2. Clone on VPS: `git clone <repo-url>`
-3. Copy `.env.example` to `.env` and fill in values
-4. Install: `npm install`
-5. Setup PostgreSQL and set DATABASE_URL
-6. Push schema: `npx drizzle-kit push`
-7. Build: `npm run build`
-8. Run: `pm2 start ecosystem.config.cjs`
-9. Dashboard at configured PORT (default 5001, avoids 3000/4000)
+2. On VPS: `cd /nfai && git stash && git pull && npm install && npx drizzle-kit push && npm run build && pm2 restart agent-core`
+3. Dashboard at configured PORT (default 5001)
 
-## Configuration
-All configurable from dashboard Settings page or env vars:
-- OpenRouter API key, base URL, model selection
-- Telegram bot token and allowed users
-- Port (via PORT env var)
+## Telegram Commands
+- `/task <desc>` - Force-execute immediately (skip planning)
+- `/status` - View running tasks
+- `/cancel <id>` - Cancel a task
+- `/list` - Recent tasks
+- `/test` - Test AI connection
+- `/reset` - Clear conversation history
+- `/memory` - View stored memories
+- `/forget` - Wipe all memory
+- `/remember <text>` - Save a note to memory
+- `/schedules` - View recurring tasks
+- `/unschedule <id>` - Remove recurring task

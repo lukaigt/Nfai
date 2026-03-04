@@ -1,77 +1,65 @@
 import { storage } from "./storage";
-import { executeTask, cancelTask, isTaskRunning, readMemory, clearMemory } from "./agent/core";
+import { executeTask, cancelTask, isTaskRunning } from "./agent/core";
 import { testConnection, chatCompletion } from "./agent/openrouter";
+import { searchMemory, getAllMemoryText, clearAllMemory, saveMemory } from "./agent/memory";
+import { startHeartbeat, setSendFunction } from "./agent/heartbeat";
+import { loadSession, appendMessage, clearSession, getSessionMessages, getConversationContext } from "./agent/session";
 
 let bot: any = null;
 let TelegramBot: any = null;
 
-const chatHistories = new Map<string, { role: "system" | "user" | "assistant"; content: string }[]>();
 const pendingPlans = new Map<string, string>();
-const MAX_HISTORY = 20;
 
-function getChatHistory(chatId: string): { role: "system" | "user" | "assistant"; content: string }[] {
-  if (!chatHistories.has(chatId)) {
-    chatHistories.set(chatId, []);
-  }
-  return chatHistories.get(chatId)!;
-}
+const CHAT_SYSTEM_PROMPT = `You are an autonomous AI agent running on the user's VPS server. You are their personal agent with real power — NOT a chatbot, NOT an assistant.
 
-function addToHistory(chatId: string, role: "user" | "assistant", content: string) {
-  const history = getChatHistory(chatId);
-  history.push({ role, content });
-  while (history.length > MAX_HISTORY) {
-    history.shift();
-  }
-}
+You have full conversation history. Use it to understand context.
 
-function clearChatHistory(chatId: string) {
-  chatHistories.set(chatId, []);
-  pendingPlans.delete(chatId);
-}
-
-const CHAT_SYSTEM_PROMPT = `You are an autonomous AI agent running on the user's VPS server. You are NOT a generic chatbot - you are their personal agent with real power.
-
-Your capabilities (you can actually do these, not just talk about them):
+Your capabilities (real, not hypothetical):
 - Run ANY shell command on the server (bash, python, system admin)
-- Scrape websites and fetch web data
-- Automate browsers with Puppeteer
-- Make HTTP requests to any API
-- Read/write files on the server
-- Install packages
+- Scrape websites, search the web, make HTTP requests
+- Read/write files, install packages
 - Use stored credentials for platforms
-- Search the web
+- Schedule recurring tasks
 
-IMPORTANT RULES:
-1. NEVER say "I'm DeepSeek" or "I'm an AI assistant" - you are the user's autonomous agent
-2. NEVER say "I can look that up if you'd like" - just DO it or propose a plan
-3. Your training data may be outdated - for ANY factual, current, or time-sensitive question, use action "execute" to search the web
-4. Be direct and confident - you have real power on this server
+CRITICAL RULES:
+1. NEVER say "I'm DeepSeek" or "I'm an AI assistant"
+2. NEVER say "I can look that up if you'd like" — just DO it or propose a plan
+3. For ANY factual, current, or time-sensitive question → use action "execute" to search the web. Your training data may be outdated
+4. Be direct and confident — you have real power
+5. Think independently — if user asks you to do something, figure out HOW yourself
+6. Remember context — if user mentioned something earlier, USE that info
+7. When user asks to build/make/create something → propose a clear plan, then execute on confirmation
 
-How to respond - return ONLY a JSON object:
+How to respond — return ONLY a JSON object:
 
-For casual chat (greetings, thanks, questions about your capabilities):
-{"reply": "your natural response", "action": "chat"}
+For casual chat (greetings, thanks, simple capability questions):
+{"reply": "your response", "action": "chat"}
 
-For factual/current questions (who's president, what's the price of X, latest news, etc.):
-{"reply": "Let me look that up for you.", "action": "execute", "taskDescription": "Search the web for: [the question]"}
+For factual/lookup questions (who's president, what's the price, latest news):
+{"reply": "Let me find out.", "action": "execute", "taskDescription": "Search the web for: [question]"}
 
-For big/complex requests that need a plan first:
-{"reply": "Here's what I'll do:\\n1. First step\\n2. Second step\\n3. Third step\\n\\nShould I go ahead?", "action": "propose", "taskDescription": "detailed description of what to execute"}
+For requests that need planning (build something, set up monitoring, scrape a site):
+{"reply": "Here's my plan:\\n1. Step one\\n2. Step two\\n3. Step three\\n\\nShould I go ahead?", "action": "propose", "taskDescription": "detailed description of what to do"}
 
-When user confirms a previously proposed plan (they say "yes", "do it", "go", "go ahead", "sure", "ok"):
-{"reply": "On it.", "action": "confirm"}
+For scheduling requests ("every 15 minutes", "daily", "hourly"):
+{"reply": "I'll set that up as a recurring task.", "action": "schedule", "taskDescription": "what to do each time", "intervalMinutes": 15}
 
-If user says "yes" but there's nothing to confirm, just ask what they need:
-{"reply": "What would you like me to do?", "action": "chat"}
+For things the user wants you to remember:
+{"reply": "Got it, I'll remember that.", "action": "remember", "memoryContent": "what to remember", "memoryTags": "relevant,tags"}
 
 ALWAYS respond with valid JSON. Nothing else.`;
 
-async function getAgentResponse(chatId: string, userMessage: string): Promise<{ reply: string; action: string; taskDescription?: string }> {
-  const history = getChatHistory(chatId);
-  const memory = await readMemory();
+async function getAgentResponse(chatId: string, userMessage: string): Promise<any> {
+  const history = await loadSession(chatId);
+  const memory = await searchMemory(userMessage);
 
-  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
-    { role: "system", content: CHAT_SYSTEM_PROMPT + (memory ? `\n\nYour memory of past tasks:\n${memory}` : "") + (pendingPlans.has(chatId) ? `\n\nYou previously proposed this plan: "${pendingPlans.get(chatId)}"` : "") },
+  const systemContent = CHAT_SYSTEM_PROMPT
+    + (memory ? `\n\nRELEVANT MEMORIES:\n${memory}` : "")
+    + (pendingPlans.has(chatId) ? `\n\nYou previously proposed this plan and are waiting for confirmation: "${pendingPlans.get(chatId)}"` : "");
+
+  type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemContent },
     ...history,
     { role: "user", content: userMessage },
   ];
@@ -83,7 +71,7 @@ async function getAgentResponse(chatId: string, userMessage: string): Promise<{ 
     if (!jsonMatch) throw new Error("No JSON");
     return JSON.parse(jsonMatch[0]);
   } catch {
-    return { reply: "Something went wrong with my response. Try again or use /task to force a task.", action: "chat" };
+    return { reply: "Something went wrong. Try again or use /task to force a task.", action: "chat" };
   }
 }
 
@@ -92,11 +80,22 @@ async function loadTelegramBot() {
     try {
       TelegramBot = (await import("node-telegram-bot-api")).default;
     } catch {
-      console.log("[Telegram] node-telegram-bot-api not available. Install it for Telegram support.");
+      console.log("[Telegram] node-telegram-bot-api not available.");
       return null;
     }
   }
   return TelegramBot;
+}
+
+async function sendMsg(chatId: string, text: string) {
+  if (bot) {
+    const chunks = text.match(/[\s\S]{1,4000}/g) || [text];
+    for (const chunk of chunks) {
+      try {
+        await bot.sendMessage(chatId, chunk);
+      } catch {}
+    }
+  }
 }
 
 export async function startTelegramBot(): Promise<boolean> {
@@ -104,7 +103,7 @@ export async function startTelegramBot(): Promise<boolean> {
   const token = tokenSetting?.value || process.env.TELEGRAM_BOT_TOKEN;
 
   if (!token) {
-    console.log("[Telegram] No bot token configured. Set it in dashboard settings or TELEGRAM_BOT_TOKEN env var.");
+    console.log("[Telegram] No bot token configured.");
     return false;
   }
 
@@ -117,6 +116,9 @@ export async function startTelegramBot(): Promise<boolean> {
     }
 
     bot = new BotClass(token, { polling: true });
+
+    setSendFunction(sendMsg);
+    startHeartbeat();
 
     bot.on("message", async (msg: any) => {
       const chatId = msg.chat.id.toString();
@@ -133,40 +135,39 @@ export async function startTelegramBot(): Promise<boolean> {
 
       if (text === "/start") {
         await bot.sendMessage(chatId, [
-          "*Your Autonomous Agent*",
+          "Your Autonomous Agent",
           "",
-          "Just talk to me naturally:",
-          "- Ask me anything and I'll answer or look it up",
-          "- Tell me to do something and I'll propose a plan first",
-          "- Say \"yes\" or \"go ahead\" to approve a plan",
+          "Talk to me naturally:",
+          "- Ask anything and I'll answer or look it up",
+          "- Tell me to do something → I'll propose a plan first",
+          "- Say 'yes' to approve, 'no' to cancel",
           "",
           "Commands:",
-          "/task <description> - Execute immediately (skip planning)",
-          "/status - View running tasks",
-          "/cancel <id> - Cancel a running task",
-          "/list - List recent tasks",
+          "/task <desc> - Execute immediately (skip planning)",
+          "/status - Running tasks",
+          "/cancel <id> - Cancel a task",
+          "/list - Recent tasks",
           "/test - Test AI connection",
-          "/id - Get your chat ID",
-          "/reset - Clear conversation history",
-          "/memory - View what I remember",
-          "/forget - Wipe my memory",
-        ].join("\n"), { parse_mode: "Markdown" });
+          "/id - Your chat ID",
+          "/reset - Clear conversation",
+          "/memory - View memories",
+          "/forget - Wipe all memory",
+          "/remember <text> - Save a note",
+          "/schedules - View recurring tasks",
+          "/unschedule <id> - Remove recurring task",
+        ].join("\n"));
         return;
       }
 
       if (text === "/id") {
-        await bot.sendMessage(chatId, `Your chat ID: \`${chatId}\``, { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, `Your chat ID: ${chatId}`);
         return;
       }
 
       if (text === "/test") {
         await bot.sendMessage(chatId, "Testing AI connection...");
         const result = await testConnection();
-        if (result.success) {
-          await bot.sendMessage(chatId, `Connected to: ${result.model}`);
-        } else {
-          await bot.sendMessage(chatId, `Connection failed: ${result.error}`);
-        }
+        await bot.sendMessage(chatId, result.success ? `Connected: ${result.model}` : `Failed: ${result.error}`);
         return;
       }
 
@@ -174,10 +175,10 @@ export async function startTelegramBot(): Promise<boolean> {
         const tasks = await storage.getAllTasks();
         const running = tasks.filter(t => t.status === "running");
         if (running.length === 0) {
-          await bot.sendMessage(chatId, "No tasks currently running.");
+          await bot.sendMessage(chatId, "No tasks running.");
         } else {
           const lines = running.map(t => `#${t.id}: ${t.title} (${t.totalTokens} tokens, $${t.totalCostUsd})`);
-          await bot.sendMessage(chatId, "*Running Tasks:*\n" + lines.join("\n"), { parse_mode: "Markdown" });
+          await bot.sendMessage(chatId, "Running:\n" + lines.join("\n"));
         }
         return;
       }
@@ -189,23 +190,19 @@ export async function startTelegramBot(): Promise<boolean> {
           await bot.sendMessage(chatId, "No tasks yet.");
         } else {
           const lines = recent.map(t => {
-            const icon = t.status === "completed" ? "done" : t.status === "failed" ? "FAIL" : t.status === "running" ? "RUN" : "WAIT";
-            return `[${icon}] #${t.id}: ${t.title.substring(0, 40)}`;
+            const icon = t.status === "completed" ? "DONE" : t.status === "failed" ? "FAIL" : t.status === "running" ? "RUN" : "WAIT";
+            return `[${icon}] #${t.id}: ${t.title.substring(0, 50)}`;
           });
-          await bot.sendMessage(chatId, "*Recent Tasks:*\n```\n" + lines.join("\n") + "\n```", { parse_mode: "Markdown" });
+          await bot.sendMessage(chatId, "Recent:\n" + lines.join("\n"));
         }
         return;
       }
 
       if (text.startsWith("/cancel")) {
-        const idStr = text.replace("/cancel", "").trim();
-        const id = parseInt(idStr);
-        if (!id) {
-          await bot.sendMessage(chatId, "Usage: /cancel <task_id>");
-          return;
-        }
+        const id = parseInt(text.replace("/cancel", "").trim());
+        if (!id) { await bot.sendMessage(chatId, "Usage: /cancel <id>"); return; }
         cancelTask(id);
-        await bot.sendMessage(chatId, `Cancelling task #${id}...`);
+        await bot.sendMessage(chatId, `Cancelling #${id}...`);
         return;
       }
 
@@ -213,41 +210,72 @@ export async function startTelegramBot(): Promise<boolean> {
         const tasks = await storage.getAllTasks();
         const totalTokens = tasks.reduce((sum, t) => sum + (t.totalTokens || 0), 0);
         const totalCost = tasks.reduce((sum, t) => sum + parseFloat(t.totalCostUsd || "0"), 0);
-        clearChatHistory(chatId);
-        await bot.sendMessage(chatId, `Conversation cleared.\n\nTotal tokens used: ${totalTokens.toLocaleString()}\nTotal cost: $${totalCost.toFixed(4)}\n\nMemory preserved. Use /forget to wipe memory too.`);
+        await clearSession(chatId);
+        pendingPlans.delete(chatId);
+        await bot.sendMessage(chatId, `Conversation cleared.\nTokens: ${totalTokens.toLocaleString()} | Cost: $${totalCost.toFixed(4)}\nMemory preserved. /forget to wipe.`);
         return;
       }
 
       if (text === "/memory") {
-        const memory = await readMemory();
+        const memory = await getAllMemoryText();
         if (!memory) {
-          await bot.sendMessage(chatId, "No memories yet. I'll remember things as I complete tasks.");
+          await bot.sendMessage(chatId, "No memories yet.");
         } else {
-          await bot.sendMessage(chatId, `*Agent Memory:*\n\`\`\`\n${memory.substring(0, 3500)}\n\`\`\``, { parse_mode: "Markdown" });
+          await sendMsg(chatId, `Memories:\n\n${memory.substring(0, 3500)}`);
         }
         return;
       }
 
       if (text === "/forget") {
-        await clearMemory();
-        clearChatHistory(chatId);
+        await clearAllMemory();
+        await clearSession(chatId);
+        pendingPlans.delete(chatId);
         await bot.sendMessage(chatId, "Memory and conversation wiped. Fresh start.");
+        return;
+      }
+
+      if (text.startsWith("/remember")) {
+        const note = text.replace("/remember", "").trim();
+        if (!note) { await bot.sendMessage(chatId, "Usage: /remember <text>"); return; }
+        await saveMemory(note, "user-note", "user");
+        await bot.sendMessage(chatId, "Noted.");
+        return;
+      }
+
+      if (text === "/schedules") {
+        const scheduled = await storage.getAllScheduledTasks();
+        const active = scheduled.filter(s => s.isActive);
+        if (active.length === 0) {
+          await bot.sendMessage(chatId, "No scheduled tasks. Ask me to do something regularly and I'll set it up.");
+        } else {
+          const lines = active.map(s => {
+            const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString() : "N/A";
+            return `#${s.id}: ${s.description.substring(0, 50)} (every ${s.intervalMinutes}min, next: ${next})`;
+          });
+          await bot.sendMessage(chatId, "Scheduled:\n" + lines.join("\n"));
+        }
+        return;
+      }
+
+      if (text.startsWith("/unschedule")) {
+        const id = parseInt(text.replace("/unschedule", "").trim());
+        if (!id) { await bot.sendMessage(chatId, "Usage: /unschedule <id>"); return; }
+        await storage.deleteScheduledTask(id);
+        await bot.sendMessage(chatId, `Removed scheduled task #${id}.`);
         return;
       }
 
       if (text.startsWith("/task")) {
         const taskDescription = text.replace("/task", "").trim();
-        if (!taskDescription) {
-          await bot.sendMessage(chatId, "Usage: /task <description>");
-          return;
-        }
-        addToHistory(chatId, "user", `/task ${taskDescription}`);
+        if (!taskDescription) { await bot.sendMessage(chatId, "Usage: /task <description>"); return; }
+        await appendMessage(chatId, "user", `/task ${taskDescription}`);
         pendingPlans.delete(chatId);
-        await createAndExecuteTask(chatId, taskDescription);
+        const context = getConversationContext(chatId);
+        await createAndExecuteTask(chatId, taskDescription, context);
         return;
       }
 
-      addToHistory(chatId, "user", text);
+      await appendMessage(chatId, "user", text);
 
       const confirmWords = /^(yes|yeah|yep|yea|sure|ok|okay|go|go ahead|do it|proceed|let's go|lets go|absolutely|confirmed|approve|start|run it)$/i;
       const cancelWords = /^(no|nah|nope|cancel|stop|nevermind|never mind|forget it|don't|dont)$/i;
@@ -256,16 +284,17 @@ export async function startTelegramBot(): Promise<boolean> {
       if (confirmWords.test(trimmedText) && pendingPlans.has(chatId)) {
         const planDesc = pendingPlans.get(chatId)!;
         pendingPlans.delete(chatId);
-        addToHistory(chatId, "assistant", "On it.");
+        await appendMessage(chatId, "assistant", "On it.");
         await bot.sendMessage(chatId, "On it.");
-        await createAndExecuteTask(chatId, planDesc);
+        const context = getConversationContext(chatId);
+        await createAndExecuteTask(chatId, planDesc, context);
         return;
       }
 
       if (cancelWords.test(trimmedText) && pendingPlans.has(chatId)) {
         pendingPlans.delete(chatId);
-        addToHistory(chatId, "assistant", "Plan cancelled. What else do you need?");
-        await bot.sendMessage(chatId, "Plan cancelled. What else do you need?");
+        await appendMessage(chatId, "assistant", "Cancelled. What else?");
+        await bot.sendMessage(chatId, "Cancelled. What else?");
         return;
       }
 
@@ -275,36 +304,54 @@ export async function startTelegramBot(): Promise<boolean> {
 
       const response = await getAgentResponse(chatId, text);
 
-      const validActions = ["chat", "propose", "execute", "confirm"];
+      const validActions = ["chat", "propose", "execute", "confirm", "schedule", "remember"];
       const action = validActions.includes(response.action) ? response.action : "chat";
 
-      if (action === "confirm") {
-        addToHistory(chatId, "assistant", "What would you like me to do?");
-        await bot.sendMessage(chatId, "What would you like me to do?");
+      if (action === "remember" && response.memoryContent) {
+        await saveMemory(response.memoryContent, response.memoryTags || "user-info", "user");
+        await appendMessage(chatId, "assistant", response.reply);
+        await bot.sendMessage(chatId, response.reply);
+        return;
+      }
+
+      if (action === "schedule" && response.taskDescription && response.intervalMinutes) {
+        const interval = Math.max(1, Math.min(response.intervalMinutes, 1440));
+        const nextRun = new Date(Date.now() + interval * 60000);
+        await storage.createScheduledTask({
+          description: response.taskDescription,
+          intervalMinutes: interval,
+          telegramChatId: chatId,
+          nextRunAt: nextRun,
+          activeStartHour: null,
+          activeEndHour: null,
+        });
+        await appendMessage(chatId, "assistant", response.reply);
+        await bot.sendMessage(chatId, response.reply);
         return;
       }
 
       if (action === "propose" && response.taskDescription) {
         pendingPlans.set(chatId, response.taskDescription);
-        addToHistory(chatId, "assistant", response.reply);
+        await appendMessage(chatId, "assistant", response.reply);
         await bot.sendMessage(chatId, response.reply);
         return;
       }
 
       if (action === "execute" && response.taskDescription) {
-        addToHistory(chatId, "assistant", response.reply);
+        await appendMessage(chatId, "assistant", response.reply);
         await bot.sendMessage(chatId, response.reply);
-        await createAndExecuteTask(chatId, response.taskDescription);
+        const context = getConversationContext(chatId);
+        await createAndExecuteTask(chatId, response.taskDescription, context);
         return;
       }
 
-      if (action === "execute" && !response.taskDescription) {
-        addToHistory(chatId, "assistant", response.reply || "Could you clarify what you'd like me to do?");
-        await bot.sendMessage(chatId, response.reply || "Could you clarify what you'd like me to do?");
+      if (action === "confirm") {
+        await appendMessage(chatId, "assistant", "What would you like me to do?");
+        await bot.sendMessage(chatId, "What would you like me to do?");
         return;
       }
 
-      addToHistory(chatId, "assistant", response.reply);
+      await appendMessage(chatId, "assistant", response.reply);
       await bot.sendMessage(chatId, response.reply);
     });
 
@@ -320,10 +367,12 @@ export async function startTelegramBot(): Promise<boolean> {
   }
 }
 
-async function createAndExecuteTask(chatId: string, description: string) {
+async function createAndExecuteTask(chatId: string, description: string, conversationContext?: string) {
   const task = await storage.createTask({
     title: description.substring(0, 80),
-    description,
+    description: conversationContext
+      ? `${description}\n\n--- CONVERSATION CONTEXT ---\n${conversationContext}`
+      : description,
     priority: 1,
     maxRetries: 5,
     telegramChatId: chatId,
@@ -347,8 +396,8 @@ async function createAndExecuteTask(chatId: string, description: string) {
         ? `Task #${task.id} done!\n\n${(completed.result || "").substring(0, 3000)}\n\nTokens: ${completed.totalTokens} | Cost: $${completed.totalCostUsd}`
         : `Task #${task.id} ${completed.status}: ${(completed.error || "Unknown error").substring(0, 500)}`;
       try {
-        await bot.sendMessage(chatId, statusMsg);
-        addToHistory(chatId, "assistant", `[Task completed] ${(completed.result || completed.error || "").substring(0, 300)}`);
+        await sendMsg(chatId, statusMsg);
+        await appendMessage(chatId, "assistant", `[Task result] ${(completed.result || completed.error || "").substring(0, 500)}`);
       } catch {}
     }
   });
