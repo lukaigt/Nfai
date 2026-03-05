@@ -65,7 +65,19 @@ async function checkAndRunDueTasks() {
           error: null,
         });
 
-        await executeTask(task, async () => {});
+        await executeTask(task, async (taskId, step, message, status) => {
+          try {
+            if (sendTelegramMessage && (step % 5 === 0 || status === "completed" || status === "failure")) {
+              const cleanMsg = message.substring(0, 200);
+              await sendTelegramMessage(
+                scheduled.telegramChatId,
+                `[Scheduled #${scheduled.id} Step ${step}] ${cleanMsg}`
+              );
+            }
+          } catch (progressErr: any) {
+            console.error(`[Heartbeat] Progress callback error for scheduled #${scheduled.id}:`, progressErr.message || progressErr);
+          }
+        });
 
         const completed = await storage.getTask(task.id);
         if (completed && sendTelegramMessage) {
@@ -76,13 +88,23 @@ async function checkAndRunDueTasks() {
           if (result !== scheduled.lastResult) {
             await sendTelegramMessage(
               scheduled.telegramChatId,
-              `[Scheduled] ${scheduled.description.substring(0, 60)}\n\n${result.substring(0, 3000)}`
+              `[Scheduled] ${scheduled.description.substring(0, 60)}\n\n${result.substring(0, 3000)}\n\nTokens: ${completed.totalTokens} | Cost: $${completed.totalCostUsd}`
             );
             await storage.updateScheduledTask(scheduled.id, { lastResult: result.substring(0, 1000) });
           }
         }
       } catch (err: any) {
         console.error(`[Heartbeat] Failed scheduled #${scheduled.id}:`, err.message);
+        if (sendTelegramMessage) {
+          try {
+            await sendTelegramMessage(
+              scheduled.telegramChatId,
+              `[Scheduled #${scheduled.id}] FAILED: ${(err.message || "Unknown error").substring(0, 300)}`
+            );
+          } catch (sendErr: any) {
+            console.error(`[Heartbeat] Failed to send error message:`, sendErr.message || sendErr);
+          }
+        }
       } finally {
         runningScheduled.delete(scheduled.id);
       }

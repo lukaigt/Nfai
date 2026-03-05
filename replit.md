@@ -10,27 +10,39 @@ An autonomous AI agent inspired by OpenClaw architecture, controllable via Teleg
 - **AI**: OpenRouter API (DeepSeek, Kimi, GPT, Claude, Gemini models)
 - **Telegram**: node-telegram-bot-api — unified conversational session
 - **Encryption**: AES-256-GCM for credential storage
-- **Tools**: run_command (shell), web scrape, code exec, HTTP requests, file ops, search_web, save_memory
+- **Tools**: run_command (120s/5MB), web_scrape (structured text), execute_code (60s), http_request (form+JSON, status+headers), search_web (8 results w/ snippets), get_credentials (clear errors), file_write/read, save_memory, wait, install_package
 
 ## Key Design Decisions (OpenClaw-aligned)
 - **Unified session**: No separate "chat mode" vs "task mode" — one continuous conversation per chat. Conversation context flows into task execution
-- **Memory with search**: BM25-style keyword search over structured memory entries (not a flat string). Relevant memories injected per-task
-- **Context compaction**: When conversation exceeds 30 messages, old messages are AI-summarized into a compact summary (OpenClaw-style pruning)
-- **Heartbeat scheduling**: Recurring tasks via `scheduled_tasks` table, checked every 60s. "Every 15 minutes" actually works
-- **Autonomous prompt**: Agent is fundamentally resourceful — always uses web login with credentials (requests.Session + cookies), never asks for API keys, searches the web when stuck, tries 3+ approaches before reporting failure. All catch blocks log errors for VPS debugging
-- **No fake tools**: Puppeteer stubs removed (they returned fake success). Agent uses run_command for real power
+- **Memory with search**: BM25-style keyword search over structured memory entries. Relevant memories injected per-task
+- **Context compaction**: When conversation exceeds 30 messages, old messages are AI-summarized (600 chars per message for detail preservation). Summary preserves credentials, URLs, file paths, and technical details
+- **Heartbeat scheduling**: Recurring tasks via `scheduled_tasks` table, checked every 60s. Real progress callbacks sent to Telegram
+- **Autonomous prompt**: Agent is fundamentally resourceful:
+  - Always uses web login with credentials (requests.Session + cookies), never asks for API keys
+  - Searches the web BEFORE trying new platforms (self-teaching)
+  - Has concrete worked examples (Reddit login, unknown website, info gathering)
+  - Has recovery patterns for common errors (403, CAPTCHA, login failures, missing modules)
+  - Tries 3+ approaches before reporting failure
+- **Execution loop hardening**:
+  - 50 max steps (up from 30)
+  - Stuck detection: same tool+args called 3+ times → forces different approach
+  - API-key interception: if agent asks for API keys → auto-corrects to web login
+  - Failed approach tracking: all failures recorded and passed to agent to avoid repetition
+  - Remaining step counter shown to agent for urgency
+- **Chat resilience**: If AI returns plain text instead of JSON → used as chat reply (never crashes). All errors logged.
+- **No fake tools**: All 11 tools are fully functional with real implementations
 
 ## Key Files
 
 ### Backend
-- `server/agent/core.ts` - Agent execution loop with context compaction and memory search
-- `server/agent/prompt.ts` - Autonomous system prompt (never ask, always act)
+- `server/agent/core.ts` - Agent execution loop (50 steps, stuck detection, API-key interception, failed approach tracking, compaction)
+- `server/agent/prompt.ts` - Autonomous system prompt with worked examples and recovery patterns
 - `server/agent/openrouter.ts` - OpenRouter API client with cost tracking
-- `server/agent/tools.ts` - Tool registry (11 real tools, no stubs)
+- `server/agent/tools.ts` - 11 real tools (run_command 120s/5MB, http_request with form data, search_web with snippets, web_scrape with structure, get_credentials with clear errors)
 - `server/agent/memory.ts` - Long-term memory with BM25 keyword search
-- `server/agent/heartbeat.ts` - Scheduled task runner (60s check loop, active hours, duplicate suppression, overlap protection)
+- `server/agent/heartbeat.ts` - Scheduled task runner (60s loop, real progress callbacks, error notifications to Telegram)
 - `server/agent/session.ts` - JSONL-based session persistence (survives restarts, auto-archive on /reset)
-- `server/telegram.ts` - Telegram bot: unified session, plan→confirm→execute, scheduling, memory commands
+- `server/telegram.ts` - Telegram bot: resilient chat (never crashes on non-JSON), plan→confirm→execute, scheduling, memory commands, sentence-boundary truncation
 - `server/routes.ts` - Dashboard API endpoints
 - `server/storage.ts` - Database storage layer (DatabaseStorage)
 - `server/db.ts` - PostgreSQL connection

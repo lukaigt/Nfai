@@ -17,9 +17,16 @@ interface AgentStep {
 
 type ProgressCallback = (taskId: number, step: number, message: string, status: string) => void;
 
-const MAX_STEPS = 30;
+const MAX_STEPS = 50;
 const COMPACTION_THRESHOLD = 30;
 const activeTasks = new Map<number, boolean>();
+
+const API_KEY_PHRASES = [
+  "api key", "api_key", "apikey", "client_id", "client_secret",
+  "oauth token", "oauth2", "access_token", "bearer token",
+  "developer account", "developer portal", "register an app",
+  "create an application", "app credentials",
+];
 
 export function isTaskRunning(taskId: number): boolean {
   return activeTasks.get(taskId) === true;
@@ -40,11 +47,11 @@ async function compactHistory(
 
   if (oldMessages.length < 5) return { tokensUsed: 0, cost: 0 };
 
-  const summaryPrompt = oldMessages.map(m => `[${m.role}]: ${m.content.substring(0, 300)}`).join("\n");
+  const summaryPrompt = oldMessages.map(m => `[${m.role}]: ${m.content.substring(0, 600)}`).join("\n");
 
   try {
     const result = await chatCompletion([
-      { role: "system", content: "Summarize this conversation history concisely. Include: key decisions made, tools used and results, important information shared by the user (credentials, preferences, file paths), current state of the task. Be factual and brief." },
+      { role: "system", content: "Summarize this conversation history concisely but thoroughly. MUST INCLUDE: all credentials/passwords discovered, login methods that worked, URLs and endpoints used, file paths created, tools that succeeded vs failed, key decisions made, current task state. Be factual and preserve ALL technical details." },
       { role: "user", content: summaryPrompt }
     ], 0.3);
 
@@ -55,11 +62,25 @@ async function compactHistory(
       ...recentMessages
     );
     return { tokensUsed: result.tokensUsed, cost: result.cost };
-  } catch {
+  } catch (err: any) {
+    console.error("[Core] Compaction failed:", err.message || err);
     const keepRecent = conversationHistory.slice(-20);
     conversationHistory.length = 0;
     conversationHistory.push(system, ...keepRecent);
     return { tokensUsed: 0, cost: 0 };
+  }
+}
+
+function detectApiKeyBegging(content: string): boolean {
+  const lower = content.toLowerCase();
+  return API_KEY_PHRASES.some(phrase => lower.includes(phrase));
+}
+
+function makeToolSignature(tool: string, args: any): string {
+  try {
+    return `${tool}:${JSON.stringify(args)}`;
+  } catch {
+    return `${tool}:unknown`;
   }
 }
 
@@ -80,12 +101,15 @@ export async function executeTask(
   let step = 0;
   let totalTokens = 0;
   let totalCost = 0;
+  const failedApproaches: string[] = [];
+  const toolCallHistory: string[] = [];
 
   try {
     while (step < MAX_STEPS && activeTasks.get(task.id)) {
       step++;
+      const remaining = MAX_STEPS - step;
 
-      onProgress?.(task.id, step, `Thinking (step ${step})...`, "info");
+      onProgress?.(task.id, step, `Thinking (step ${step}/${MAX_STEPS})...`, "info");
 
       const compactionResult = await compactHistory(conversationHistory);
       if (compactionResult.tokensUsed > 0) {
@@ -121,7 +145,28 @@ export async function executeTask(
 
         conversationHistory.push(
           { role: "assistant", content: result.content },
-          { role: "user", content: "Please respond with valid JSON as specified in your instructions." }
+          { role: "user", content: "Your response was not valid JSON. You MUST respond with a JSON object containing: thinking, plan, tool, args, done, summary. Try again." }
+        );
+        continue;
+      }
+
+      if (detectApiKeyBegging(result.content)) {
+        conversationHistory.push(
+          { role: "assistant", content: result.content },
+          { role: "user", content: `STOP. You are asking for API keys/credentials/OAuth/client_id. This is WRONG.
+
+You have the get_credentials tool — call it to get stored username and password.
+When you have username+password, LOG IN VIA THE WEB:
+1. Write a Python script using requests.Session()
+2. POST to the site's login form with username+password
+3. Use the session cookies for subsequent requests
+
+You do NOT need API keys, client_id, client_secret, or OAuth tokens.
+You do NOT need to register a developer app.
+You log in like a PERSON would — with username and password via web form.
+
+If you don't know the login URL, call search_web to find it.
+Resume the task NOW using web login. You have ${remaining} steps left.` }
         );
         continue;
       }
@@ -150,13 +195,37 @@ export async function executeTask(
 
         try {
           await saveTaskMemory(task.title, parsed.result || parsed.summary || "", totalTokens, totalCost.toFixed(4));
-        } catch {}
+        } catch (memErr: any) {
+          console.error("[Core] Failed to save task memory:", memErr.message || memErr);
+        }
 
         activeTasks.delete(task.id);
         return;
       }
 
       if (parsed.tool && parsed.args) {
+        const toolSig = makeToolSignature(parsed.tool, parsed.args);
+        const repeatCount = toolCallHistory.filter(s => s === toolSig).length;
+
+        if (repeatCount >= 2) {
+          conversationHistory.push(
+            { role: "assistant", content: result.content },
+            { role: "user", content: `STUCK DETECTION: You have called "${parsed.tool}" with the EXACT same arguments ${repeatCount + 1} times. This is not working.
+
+You MUST try a FUNDAMENTALLY DIFFERENT approach:
+- Different tool (run_command instead of http_request, or vice versa)
+- Different method (Python script instead of direct HTTP, or curl instead of Python)
+- Different endpoint or URL
+- Search the web for alternative methods
+
+Previous failed approaches: ${failedApproaches.length > 0 ? failedApproaches.join("; ") : "none recorded yet"}
+You have ${remaining} steps left. Do NOT repeat the same call.` }
+          );
+          continue;
+        }
+
+        toolCallHistory.push(toolSig);
+
         await storage.createTaskLog({
           taskId: task.id,
           step,
@@ -168,7 +237,7 @@ export async function executeTask(
           costUsd: result.cost.toFixed(6),
         });
 
-        onProgress?.(task.id, step, `Executing tool: ${parsed.tool}`, "info");
+        onProgress?.(task.id, step, `Using ${parsed.tool}...`, "info");
 
         const toolResult = await executeTool(parsed.tool, parsed.args);
 
@@ -183,19 +252,43 @@ export async function executeTask(
           status: toolResult.success ? "success" : "failure",
         });
 
-        conversationHistory.push(
-          { role: "assistant", content: result.content },
-          {
-            role: "user",
-            content: toolResult.success
-              ? `Tool "${parsed.tool}" executed successfully. Output:\n${toolResult.output.substring(0, 3000)}\n\nContinue with the next step.`
-              : `Tool "${parsed.tool}" FAILED. Error: ${toolResult.error}\n\nTry an alternative approach. Do NOT give up — think of another way to accomplish this.`,
-          }
-        );
+        if (toolResult.success) {
+          conversationHistory.push(
+            { role: "assistant", content: result.content },
+            {
+              role: "user",
+              content: `Tool "${parsed.tool}" executed successfully. Output:\n${toolResult.output.substring(0, 4000)}\n\nContinue with the next step.`,
+            }
+          );
+        } else {
+          const failDesc = `${parsed.tool}(${JSON.stringify(parsed.args).substring(0, 100)}): ${(toolResult.error || "").substring(0, 100)}`;
+          failedApproaches.push(failDesc);
+
+          conversationHistory.push(
+            { role: "assistant", content: result.content },
+            {
+              role: "user",
+              content: `Tool "${parsed.tool}" FAILED. Error: ${toolResult.error}
+
+ALL PREVIOUS FAILED APPROACHES:
+${failedApproaches.map((f, i) => `${i + 1}. ${f}`).join("\n")}
+
+You MUST try a COMPLETELY DIFFERENT method. Do NOT repeat any of the above.
+Suggestions:
+- If HTTP failed → try writing a Python script with run_command instead
+- If Python failed → try curl with run_command
+- If login failed → search_web for "how to login to [site] programmatically 2024"
+- If a library is missing → install it first with run_command "pip3 install [lib]"
+- If blocked/403 → try different User-Agent, try mobile endpoint, try old/legacy version of the site
+
+You have ${remaining} steps left. Make them count.`,
+            }
+          );
+        }
       } else {
         conversationHistory.push(
           { role: "assistant", content: result.content },
-          { role: "user", content: "Continue. If you need to use a tool, specify it. If the task is done, set done: true." }
+          { role: "user", content: `Continue. Use a tool to take action — don't just think. If the task is done, set done: true with a result. You have ${remaining} steps left.` }
         );
       }
     }
@@ -208,7 +301,7 @@ export async function executeTask(
     } else {
       await storage.updateTask(task.id, {
         status: "failed",
-        error: `Task exceeded maximum steps (${MAX_STEPS}). Partial progress saved.`,
+        error: `Task exceeded maximum steps (${MAX_STEPS}). Failed approaches: ${failedApproaches.join("; ") || "none"}`,
       });
     }
   } catch (error: any) {
