@@ -10,25 +10,27 @@ let TelegramBot: any = null;
 
 const pendingPlans = new Map<string, string>();
 
-const CHAT_SYSTEM_PROMPT = `You are an autonomous AI agent running on the user's VPS server. You are their personal agent with real power — NOT a chatbot, NOT an assistant.
+const CHAT_SYSTEM_PROMPT = `You are an autonomous AI agent running on the user's VPS server. You are their personal agent with real power — a person sitting at a powerful computer who figures things out.
 
-You have full conversation history. Use it to understand context.
+You have full conversation history and long-term memory. Use them.
 
-Your capabilities (real, not hypothetical):
-- Run ANY shell command on the server (bash, python, system admin)
+Your real capabilities:
+- Run ANY shell command (bash, python, curl, system admin, cron)
+- Log in to ANY website using stored credentials (username+password via web login, NOT API keys)
 - Scrape websites, search the web, make HTTP requests
-- Read/write files, install packages
-- Use stored credentials for platforms
+- Read/write files, install packages, build apps
 - Schedule recurring tasks
 
 CRITICAL RULES:
 1. NEVER say "I'm DeepSeek" or "I'm an AI assistant"
-2. NEVER say "I can look that up if you'd like" — just DO it or propose a plan
-3. For ANY factual, current, or time-sensitive question → use action "execute" to search the web. Your training data may be outdated
-4. Be direct and confident — you have real power
-5. Think independently — if user asks you to do something, figure out HOW yourself
-6. Remember context — if user mentioned something earlier, USE that info
-7. When user asks to build/make/create something → propose a clear plan, then execute on confirmation
+2. NEVER say "I can look that up if you'd like" — for questions, just look it up (execute). For complex tasks, propose a plan then execute on confirmation
+3. NEVER say "I need API credentials/keys/client_id" — you have login credentials, you log in via web like a person
+4. NEVER ask for things you can figure out yourself — search the web if you don't know how
+5. For ANY factual, current, or time-sensitive question → use action "execute" to search the web
+6. Think independently — figure out HOW to do things yourself
+7. When user mentions a platform they have accounts on → your plan should use WEB LOGIN with Python requests, NOT API keys
+8. Remember context — if user mentioned credentials or preferences, USE that info
+9. When proposing plans for website interaction → always use: get credentials, write Python script with requests.Session(), log in, use cookies
 
 How to respond — return ONLY a JSON object:
 
@@ -38,8 +40,8 @@ For casual chat (greetings, thanks, simple capability questions):
 For factual/lookup questions (who's president, what's the price, latest news):
 {"reply": "Let me find out.", "action": "execute", "taskDescription": "Search the web for: [question]"}
 
-For requests that need planning (build something, set up monitoring, scrape a site):
-{"reply": "Here's my plan:\\n1. Step one\\n2. Step two\\n3. Step three\\n\\nShould I go ahead?", "action": "propose", "taskDescription": "detailed description of what to do"}
+For requests that need planning (build something, interact with a platform, scrape a site):
+{"reply": "Here's my plan:\\n1. Step one\\n2. Step two\\n3. Step three\\n\\nShould I go ahead?", "action": "propose", "taskDescription": "detailed description including: get credentials, log in via web with Python requests, perform actions with session cookies"}
 
 For scheduling requests ("every 15 minutes", "daily", "hourly"):
 {"reply": "I'll set that up as a recurring task.", "action": "schedule", "taskDescription": "what to do each time", "intervalMinutes": 15}
@@ -68,9 +70,10 @@ async function getAgentResponse(chatId: string, userMessage: string): Promise<an
     const result = await chatCompletion(messages, 0.5);
     const cleaned = result.content.replace(/```json\n?|\n?```/g, "").trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON");
+    if (!jsonMatch) throw new Error("No JSON in AI response: " + cleaned.substring(0, 200));
     return JSON.parse(jsonMatch[0]);
-  } catch {
+  } catch (err: any) {
+    console.error("[Telegram] getAgentResponse error:", err.message || err);
     return { reply: "Something went wrong. Try again or use /task to force a task.", action: "chat" };
   }
 }
@@ -79,8 +82,8 @@ async function loadTelegramBot() {
   if (!TelegramBot) {
     try {
       TelegramBot = (await import("node-telegram-bot-api")).default;
-    } catch {
-      console.log("[Telegram] node-telegram-bot-api not available.");
+    } catch (err: any) {
+      console.error("[Telegram] node-telegram-bot-api not available:", err.message || err);
       return null;
     }
   }
@@ -93,7 +96,9 @@ async function sendMsg(chatId: string, text: string) {
     for (const chunk of chunks) {
       try {
         await bot.sendMessage(chatId, chunk);
-      } catch {}
+      } catch (err: any) {
+        console.error("[Telegram] sendMsg error:", err.message || err);
+      }
     }
   }
 }
@@ -112,7 +117,9 @@ export async function startTelegramBot(): Promise<boolean> {
 
   try {
     if (bot) {
-      try { bot.stopPolling(); } catch {}
+      try { bot.stopPolling(); } catch (err: any) {
+        console.error("[Telegram] stopPolling (pre-start) error:", err.message || err);
+      }
     }
 
     bot = new BotClass(token, { polling: true });
@@ -388,7 +395,9 @@ async function createAndExecuteTask(chatId: string, description: string, convers
         const truncated = message.substring(0, 300);
         await bot.sendMessage(chatId, `[Step ${step}] ${truncated}`);
       }
-    } catch {}
+    } catch (err: any) {
+      console.error("[Telegram] Task step callback error:", err.message || err);
+    }
   }).then(async () => {
     const completed = await storage.getTask(task.id);
     if (completed) {
@@ -398,14 +407,18 @@ async function createAndExecuteTask(chatId: string, description: string, convers
       try {
         await sendMsg(chatId, statusMsg);
         await appendMessage(chatId, "assistant", `[Task result] ${(completed.result || completed.error || "").substring(0, 500)}`);
-      } catch {}
+      } catch (err: any) {
+        console.error("[Telegram] Task completion message error:", err.message || err);
+      }
     }
   });
 }
 
 export async function stopTelegramBot(): Promise<void> {
   if (bot) {
-    try { bot.stopPolling(); } catch {}
+    try { bot.stopPolling(); } catch (err: any) {
+      console.error("[Telegram] stopPolling error:", err.message || err);
+    }
     bot = null;
   }
 }

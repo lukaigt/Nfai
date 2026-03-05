@@ -17,7 +17,7 @@ An autonomous AI agent inspired by OpenClaw architecture, controllable via Teleg
 - **Memory with search**: BM25-style keyword search over structured memory entries (not a flat string). Relevant memories injected per-task
 - **Context compaction**: When conversation exceeds 30 messages, old messages are AI-summarized into a compact summary (OpenClaw-style pruning)
 - **Heartbeat scheduling**: Recurring tasks via `scheduled_tasks` table, checked every 60s. "Every 15 minutes" actually works
-- **Autonomous prompt**: Agent thinks independently, never asks for clarification, uses get_credentials before complaining, searches the web for factual questions
+- **Autonomous prompt**: Agent is fundamentally resourceful — always uses web login with credentials (requests.Session + cookies), never asks for API keys, searches the web when stuck, tries 3+ approaches before reporting failure. All catch blocks log errors for VPS debugging
 - **No fake tools**: Puppeteer stubs removed (they returned fake success). Agent uses run_command for real power
 
 ## Key Files
